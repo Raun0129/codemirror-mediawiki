@@ -58,7 +58,7 @@ export default (cm: CodeMirror6): Extension => [
 					if (target) {
 						const {doc} = state,
 							ref = await getLSP(view, false, cm.getWikiConfig)
-								?.['provideDefinition'](doc.toString(), indexToPos(doc, first.to));
+								?.provideDefinition(doc.toString(), indexToPos(doc, first.to));
 						return {
 							pos,
 							end: to,

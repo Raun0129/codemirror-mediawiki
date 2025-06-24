@@ -51,7 +51,7 @@ export default (cm: CodeMirror6): Extension => [
 						text,
 						cursor,
 						signatureHelp: await getLSP(view, false, cm.getWikiConfig)
-							?.['provideSignatureHelp'](text, indexToPos(doc, cursor)),
+							?.provideSignatureHelp(text, indexToPos(doc, cursor)),
 					}),
 				});
 			})();

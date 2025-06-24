@@ -60,8 +60,8 @@ export const getWikiLinter: getAsyncLinter<Promise<MixedDiagnostic[]>, Option, o
 	);
 	const lsp = getLSP(obj!, opt?.['include'] as boolean | undefined)!;
 	return async (text, config) => {
-		const diagnostics = (await lsp['provideDiagnostics'](text)).filter(
-				({code, severity}: {code?: string; severity?: number}) => Number(config?.[code!] ?? 2) > Number(severity === 2),
+		const diagnostics = (await lsp.provideDiagnostics(text)).filter(
+				({code, severity}) => Number(config?.[code!] ?? 2) > Number(severity === 2),
 			),
 			tokens = 'findStyleTokens' in lsp && config?.['invalid-css'] !== '0' ? await lsp.findStyleTokens() : [];
 		if (tokens.length === 0) {

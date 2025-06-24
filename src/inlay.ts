@@ -66,7 +66,7 @@ const updateField = async ({view, docChanged}: Pick<ViewUpdate, 'view' | 'docCha
 		view.dispatch({
 			effects: stateEffect.of({
 				text,
-				inlayHints: await getLSP(view)?.['provideInlayHints'](text),
+				inlayHints: await getLSP(view)?.provideInlayHints(text),
 			}),
 		});
 	}
