@@ -1,8 +1,5 @@
 /.vscode/
-/build
-dist/
 /node_modules
-!/dist/main.min.js
 /.markdownlint.json
 .eslintcache
 **/*.txt

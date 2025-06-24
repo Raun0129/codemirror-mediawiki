@@ -1,0 +1,27 @@
+import type { ConfigData } from 'wikiparser-node';
+import type { MwConfig } from './token';
+export declare const tagModes: {
+    onlyinclude: string;
+    includeonly: string;
+    noinclude: string;
+    pre: string;
+    nowiki: string;
+    indicator: string;
+    poem: string;
+    ref: string;
+    references: string;
+    gallery: string;
+    poll: string;
+    tabs: string;
+    tab: string;
+    choose: string;
+    option: string;
+    combobox: string;
+    combooption: string;
+    inputbox: string;
+    templatedata: string;
+    mapframe: string;
+    maplink: string;
+    graph: string;
+};
+export declare const getStaticMwConfig: ({ variable, parserFunction: [p0, p1, ...p2], protocol, nsid, functionHook, variants, redirection, ext, doubleUnderscore: [d0, d1, d2, d3], img, }: ConfigData, modes: Record<string, string>) => MwConfig;

@@ -1,0 +1,443 @@
+/**
+ * @author MusikAnimal, Bhsd and others
+ * @license GPL-2.0-or-later
+ * @see https://gerrit.wikimedia.org/g/mediawiki/extensions/CodeMirror
+ */
+import { HighlightStyle, LanguageSupport, StreamLanguage, syntaxHighlighting, syntaxTree, } from '@codemirror/language';
+import { insertCompletionText, pickedCompletion } from '@codemirror/autocomplete';
+import { commonHtmlAttrs, htmlAttrs, extAttrs } from 'wikiparser-node/dist/util/sharable.mjs';
+import { MediaWiki } from './token';
+import { htmlTags, tokens } from './config';
+import { braceStackUpdate } from './fold';
+const wmf = /\.(?:wiktionary|wiki(?:pedia|books|news|quote|source|versity|voyage))\.org$/u;
+/**
+ * 检查首字母大小写并插入正确的自动填充内容
+ * @param view
+ * @param completion 自动填充内容
+ * @param from 起始位置
+ * @param to 结束位置
+ */
+const apply = (view, completion, from, to) => {
+    let { label } = completion;
+    const initial = label.charAt(0).toLowerCase();
+    if (view.state.sliceDoc(from, from + 1) === initial) {
+        label = initial + label.slice(1);
+    }
+    view.dispatch({
+        ...insertCompletionText(view.state, label, from, to),
+        annotations: pickedCompletion.of(completion),
+    });
+};
+/**
+ * 判断节点是否包含指定类型
+ * @param types 节点类型
+ * @param names 指定类型
+ */
+export const hasTag = (types, names) => (Array.isArray(names) ? names : [names]).some(name => types.has(name in tokens ? tokens[name] : name));
+export class FullMediaWiki extends MediaWiki {
+    constructor(config) {
+        super(config);
+        const { urlProtocols, nsid, functionSynonyms, doubleUnderscore, } = config;
+        this.nsRegex = new RegExp(String.raw `^(${Object.keys(nsid).filter(Boolean).join('|').replace(/_/gu, ' ')})\s*:\s*`, 'iu');
+        this.functionSynonyms = functionSynonyms.flatMap((obj, i) => Object.keys(obj).map((label) => ({
+            type: i ? 'constant' : 'function',
+            label,
+        })));
+        this.doubleUnderscore = doubleUnderscore.flatMap(Object.keys).map((label) => ({
+            type: 'constant',
+            label,
+        }));
+        this.extTags = this.tags.map((label) => ({ type: 'type', label }));
+        this.htmlTags = htmlTags.filter(tag => !this.tags.includes(tag)).map((label) => ({
+            type: 'type',
+            label,
+        }));
+        this.protocols = urlProtocols.split('|').map((label) => ({
+            type: 'namespace',
+            label: label.replace(/\\\//gu, '/'),
+        }));
+        this.imgKeys = this.img.map((label) => label.endsWith('$1')
+            ? { type: 'property', label: label.slice(0, -2), detail: '$1' }
+            : { type: 'keyword', label });
+        this.htmlAttrs = [
+            ...[...commonHtmlAttrs].map((label) => ({ type: 'property', label })),
+            { type: 'variable', label: 'data-', detail: '*' },
+            { type: 'namespace', label: 'xmlns:', detail: '*' },
+        ];
+        this.elementAttrs = new Map(Object.entries(htmlAttrs).map(([key, value]) => [
+            key,
+            [...value].map((label) => ({ type: 'property', label })),
+        ]));
+        this.extAttrs = new Map(Object.entries(extAttrs).map(([key, value]) => [
+            key,
+            [...value].map((label) => ({ type: 'property', label })),
+        ]));
+    }
+    /**
+     * This defines the actual CSS class assigned to each tag/token.
+     *
+     * @see https://codemirror.net/docs/ref/#language.TagStyle
+     */
+    getTagStyles() {
+        return Object.keys(this.tokenTable).map((className) => ({
+            tag: this.tokenTable[className],
+            class: `cm-${className}`,
+        }));
+    }
+    mediawiki(tags) {
+        const parser = super.mediawiki(tags);
+        parser.languageData = {
+            closeBrackets: { brackets: ['(', '[', '{', '"'], before: ')]}>' },
+            autocomplete: this.completionSource,
+        };
+        return parser;
+    }
+    /**
+     * 提供链接建议
+     * @param str 搜索字符串，开头不包含` `，但可能包含`_`
+     * @param ns 命名空间
+     */
+    async #linkSuggest(str, ns = 0) {
+        const { config: { linkSuggest, nsid }, nsRegex } = this;
+        if (typeof linkSuggest !== 'function' || /[|{}<>[\]#]/u.test(str)) {
+            return undefined;
+        }
+        let subpage = false, search = str, offset = 0;
+        /* eslint-disable no-param-reassign */
+        if (search.startsWith('/')) {
+            ns = 0;
+            subpage = true;
+        }
+        else {
+            search = search.replace(/_/gu, ' ');
+            const mt = /^\s*/u.exec(search);
+            [{ length: offset }] = mt;
+            search = search.slice(offset);
+            if (search.startsWith(':')) {
+                const [{ length }] = /^:\s*/u.exec(search);
+                offset += length;
+                search = search.slice(length);
+                ns = 0;
+            }
+            if (!search) {
+                return undefined;
+            }
+            const mt2 = nsRegex.exec(search);
+            if (mt2) {
+                const [{ length }, prefix] = mt2;
+                ns = nsid[prefix.replace(/ /gu, '_').toLowerCase()] || 1;
+                offset += length;
+                search = `${ns === -2 ? 'File' : prefix}:${search.slice(length)}`;
+            }
+        }
+        /* eslint-enable no-param-reassign */
+        const underscore = str.slice(offset).includes('_');
+        return {
+            offset,
+            options: (await linkSuggest(search, ns, subpage)).map(([label]) => ({
+                type: 'text',
+                label: underscore ? label.replace(/ /gu, '_') : label,
+            })),
+        };
+    }
+    /**
+     * 提供模板参数建议
+     * @param search 搜索字符串
+     * @param page 模板名，可包含`_`、`:`等
+     * @param equal 是否有等号
+     */
+    async #paramSuggest(search, page, equal) {
+        const { config: { paramSuggest } } = this;
+        return page && typeof paramSuggest === 'function' && !/[|{}<>[\]]/u.test(page)
+            ? {
+                offset: /^\s*/u.exec(search)[0].length,
+                options: (await paramSuggest(page))
+                    .map(([key, detail]) => ({ type: 'variable', label: key + equal, detail })),
+            }
+            : undefined;
+    }
+    /** 自动补全魔术字和标签名 */
+    get completionSource() {
+        return async (context) => {
+            const { state, pos, explicit } = context, node = syntaxTree(state).resolve(pos, -1), types = new Set(node.name.split('_')), isParserFunction = hasTag(types, 'parserFunctionName'), 
+            /** 开头不包含` `，但可能包含`_` */ search = state.sliceDoc(node.from, pos).trimStart(), start = pos - search.length;
+            let { prevSibling } = node;
+            if (explicit || isParserFunction && search.includes('#') || wmf.test(location.hostname)) {
+                const validFor = /^[^|{}<>[\]#]*$/u;
+                if (isParserFunction || hasTag(types, 'templateName')) {
+                    const options = search.includes(':') ? [] : [...this.functionSynonyms], suggestions = await this.#linkSuggest(search, 10) ?? { offset: 0, options: [] };
+                    options.push(...suggestions.options);
+                    return options.length === 0
+                        ? null
+                        : {
+                            from: start + suggestions.offset,
+                            options,
+                            validFor,
+                        };
+                }
+                else if (explicit && hasTag(types, 'templateBracket') && context.matchBefore(/\{\{$/u)) {
+                    return {
+                        from: pos,
+                        options: this.functionSynonyms,
+                        validFor,
+                    };
+                }
+                const isPage = hasTag(types, 'pageName') && hasTag(types, 'parserFunction') || 0;
+                if (isPage && search.trim() || hasTag(types, 'linkPageName')) {
+                    let prefix = '';
+                    if (isPage) {
+                        prefix = this.autocompleteNamespaces[[...types].find(t => t.startsWith('mw-function-'))
+                            .slice(12)];
+                    }
+                    const suggestions = await this.#linkSuggest(prefix + search);
+                    if (!suggestions) {
+                        return null;
+                    }
+                    else if (!isPage) {
+                        suggestions.options = suggestions.options.map((option) => ({ ...option, apply }));
+                    }
+                    else if (prefix === 'Module:') {
+                        suggestions.options = suggestions.options
+                            .filter(({ label }) => !label.endsWith('/doc'));
+                    }
+                    return {
+                        // eslint-disable-next-line unicorn/explicit-length-check
+                        from: start + suggestions.offset - (isPage && prefix.length),
+                        options: suggestions.options,
+                        validFor,
+                    };
+                }
+                const isArgument = hasTag(types, 'templateArgumentName'), prevIsDelimiter = prevSibling?.name.includes(tokens.templateDelimiter), isDelimiter = hasTag(types, 'templateDelimiter')
+                    || hasTag(types, 'templateBracket') && prevIsDelimiter;
+                if (this.tags.includes('templatedata')
+                    && (isDelimiter
+                        || isArgument && !search.includes('=')
+                        || hasTag(types, 'template') && prevIsDelimiter)) {
+                    let stack = -1, 
+                    /** 可包含`_`、`:`等 */ page = '';
+                    while (prevSibling) {
+                        const { name, from, to } = prevSibling;
+                        if (name.includes(tokens.templateBracket)) {
+                            const [lbrace, rbrace] = braceStackUpdate(state, prevSibling);
+                            stack += lbrace;
+                            if (stack >= 0) {
+                                break;
+                            }
+                            stack += rbrace;
+                        }
+                        else if (stack === -1 && name.includes(tokens.templateName)) {
+                            page = state.sliceDoc(from, to) + page;
+                        }
+                        else if (page && !name.includes(tokens.comment)) {
+                            prevSibling = null;
+                            break;
+                        }
+                        ({ prevSibling } = prevSibling);
+                    }
+                    if (prevSibling && page) {
+                        const equal = isArgument && state.sliceDoc(pos, node.to).trim() === '=' ? '' : '=', suggestions = await this.#paramSuggest(isDelimiter ? '' : search, page, equal);
+                        if (suggestions && suggestions.options.length > 0) {
+                            return {
+                                from: isDelimiter ? pos : start + suggestions.offset,
+                                options: suggestions.options,
+                                validFor: /^[^|{}=]*$/u,
+                            };
+                        }
+                    }
+                }
+            }
+            const isTagName = hasTag(types, ['htmlTagName', 'extTagName']), explicitMatch = explicit && context.matchBefore(/\s$/u), validForAttr = /^[a-z]*$/iu;
+            if (isTagName && explicitMatch
+                || hasTag(types, ['htmlTagAttribute', 'extTagAttribute', 'tableDefinition'])) {
+                const tagName = isTagName ? search.trim() : /mw-(?:ext|html)-([a-z]+)/u.exec(node.name)[1], mt = explicitMatch || context.matchBefore(hasTag(types, 'tableDefinition') ? /[\s|-][a-z]+$/iu : /\s[a-z]+$/iu);
+                return mt && (mt.from < start || /^\s/u.test(mt.text))
+                    ? {
+                        from: mt.from + 1,
+                        options: [
+                            ...tagName === 'meta' || tagName === 'link'
+                                || tagName in this.config.tags && !this.elementAttrs.has(tagName)
+                                ? []
+                                : this.htmlAttrs,
+                            ...this.elementAttrs.get(tagName) ?? [],
+                            ...this.extAttrs.get(tagName) ?? [],
+                        ],
+                        validFor: validForAttr,
+                    }
+                    : null;
+            }
+            else if (explicit && hasTag(types, ['tableTd', 'tableTh', 'tableCaption'])) {
+                const [, tagName] = /mw-table-([a-z]+)/u.exec(node.name), mt = context.matchBefore(/[\s|!+][a-z]*$/iu);
+                if (mt && (mt.from < start || /^\s/u.test(mt.text))) {
+                    return {
+                        from: mt.from + 1,
+                        options: [
+                            ...this.htmlAttrs,
+                            ...this.elementAttrs.get(tagName) ?? [],
+                        ],
+                        validFor: validForAttr,
+                    };
+                }
+            }
+            else if (hasTag(types, [
+                'comment',
+                'templateVariableName',
+                'templateName',
+                'linkPageName',
+                'linkToSection',
+                'extLink',
+            ])) {
+                return null;
+            }
+            let mt = context.matchBefore(/__(?:(?!__)[\p{L}\p{N}_])*$/u);
+            if (mt) {
+                return {
+                    from: mt.from,
+                    options: this.doubleUnderscore,
+                    validFor: /^[\p{L}\p{N}]*$/u,
+                };
+            }
+            mt = context.matchBefore(/<\/?[a-z\d]*$/iu);
+            const extTags = [...types].filter(t => t.startsWith('mw-tag-'))
+                .map(s => s.slice(7));
+            if (mt && (explicit || mt.to - mt.from > 1)) {
+                const validFor = /^[a-z\d]*$/iu;
+                if (mt.text[1] === '/') {
+                    const mt2 = context
+                        .matchBefore(/<[a-z\d]+(?:\s[^<>]*)?>(?:(?!<\/?[a-z]).)*<\/[a-z\d]*$/iu), target = /^<([a-z\d]+)/iu.exec(mt2?.text ?? '')?.[1].toLowerCase(), extTag = extTags[extTags.length - 1], closed = /^\s*>/u.test(state.sliceDoc(pos)), options = [
+                        ...this.htmlTags.filter(({ label }) => !this.voidHtmlTags.has(label)),
+                        ...extTag ? [{ type: 'type', label: extTag, boost: 50 }] : [],
+                    ], i = this.permittedHtmlTags.has(target) && options.findIndex(({ label }) => label === target);
+                    if (i !== false && i !== -1) {
+                        options.splice(i, 1, { type: 'type', label: target, boost: 99 });
+                    }
+                    return {
+                        from: mt.from + 2,
+                        options: closed
+                            ? options
+                            : options.map((option) => ({ ...option, apply: `${option.label}>` })),
+                        validFor,
+                    };
+                }
+                return {
+                    from: mt.from + 1,
+                    options: [
+                        ...this.htmlTags,
+                        ...this.extTags.filter(({ label }) => !extTags.includes(label)),
+                    ],
+                    validFor,
+                };
+            }
+            const isDelimiter = explicit && hasTag(types, 'fileDelimiter');
+            if (isDelimiter
+                || hasTag(types, 'fileText')
+                    && prevSibling?.name.includes(tokens.fileDelimiter)
+                    && !search.includes('[')) {
+                const equal = state.sliceDoc(pos, pos + 1) === '=';
+                return {
+                    from: isDelimiter ? pos : prevSibling.to,
+                    options: equal
+                        ? this.imgKeys.map((option) => ({
+                            ...option,
+                            apply: option.label.replace(/=$/u, ''),
+                        }))
+                        : this.imgKeys,
+                    validFor: /^[^|{}<>[\]$]*$/u,
+                };
+            }
+            else if (!hasTag(types, ['linkText', 'extLinkText'])) {
+                mt = context.matchBefore(/(?:^|[^[])\[[a-z:/]*$/iu);
+                if (mt && (explicit || !mt.text.endsWith('['))) {
+                    return {
+                        from: mt.from + (mt.text[1] === '[' ? 2 : 1),
+                        options: this.protocols,
+                        validFor: /^[a-z:/]*$/iu,
+                    };
+                }
+            }
+            return null;
+        };
+    }
+}
+/**
+ * Gets a LanguageSupport instance for the MediaWiki mode.
+ * @param config Configuration for the MediaWiki mode
+ */
+export const mediawiki = (config) => {
+    const mode = new FullMediaWiki(config), lang = StreamLanguage.define(mode.mediawiki()), highlighter = syntaxHighlighting(HighlightStyle.define(mode.getTagStyles()));
+    return new LanguageSupport(lang, highlighter);
+};
+/**
+ * Gets a LanguageSupport instance for the mixed MediaWiki-HTML mode.
+ * @param config Configuration for the MediaWiki mode
+ */
+export const html = (config) => mediawiki({
+    ...config,
+    tags: {
+        ...config.tags,
+        script: true,
+        style: true,
+    },
+    tagModes: {
+        ...config.tagModes,
+        script: 'javascript',
+        style: 'css',
+    },
+    permittedHtmlTags: [
+        'html',
+        'base',
+        'title',
+        'menu',
+        'a',
+        'area',
+        'audio',
+        'map',
+        'track',
+        'video',
+        'embed',
+        'iframe',
+        'object',
+        'picture',
+        'source',
+        'canvas',
+        'col',
+        'colgroup',
+        'tbody',
+        'tfoot',
+        'thead',
+        'button',
+        'datalist',
+        'fieldset',
+        'form',
+        'input',
+        'label',
+        'legend',
+        'meter',
+        'optgroup',
+        'option',
+        'output',
+        'progress',
+        'select',
+        'textarea',
+        'details',
+        'dialog',
+        'slot',
+        'template',
+        'dir',
+        'frame',
+        'frameset',
+        'marquee',
+        'param',
+        'xmp',
+    ],
+    implicitlyClosedHtmlTags: [
+        'area',
+        'base',
+        'col',
+        'embed',
+        'frame',
+        'input',
+        'param',
+        'source',
+        'track',
+    ],
+});

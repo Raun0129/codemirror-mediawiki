@@ -1,0 +1,35 @@
+import { indentMore, indentLess } from '@codemirror/commands';
+import { CodeMirror6 } from './codemirror';
+const entity = { '"': 'quot', "'": 'apos', '<': 'lt', '>': 'gt', '&': 'amp', ' ': 'nbsp' };
+/**
+ * 根据函数转换选中文本
+ * @param func 转换函数
+ * @param cmd 原命令
+ */
+const convert = (func, cmd) => (view) => {
+    if (view.state.selection.ranges.some(range => !range.empty)) {
+        CodeMirror6.replaceSelections(view, func);
+        return true;
+    }
+    return cmd(view);
+};
+// eslint-disable-next-line @typescript-eslint/no-misused-spread
+export const escapeHTML = (str) => [...str].map(c => {
+    if (c in entity) {
+        return `&${entity[c]};`;
+    }
+    const code = c.codePointAt(0);
+    return code < 256 ? `&#${code};` : `&#x${code.toString(16)};`;
+}).join(''), escapeURI = (str) => {
+    if (str.includes('%')) {
+        try {
+            return decodeURIComponent(str);
+        }
+        catch { }
+    }
+    return encodeURIComponent(str);
+};
+export default [
+    { key: 'Mod-[', run: convert(escapeHTML, indentLess) },
+    { key: 'Mod-]', run: convert(escapeURI, indentMore) },
+];
