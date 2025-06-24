@@ -48,7 +48,7 @@ export const createTooltipView = (view: EditorView, innerHTML: string): TooltipV
 export default (cm: CodeMirror6): Extension => hoverTooltip(async (view, pos): Promise<Tooltip | null> => {
 	const {state: {doc}} = view,
 		hover = await getLSP(view, false, cm.getWikiConfig)
-			?.provideHover(doc.toString(), indexToPos(doc, pos));
+			?.['provideHover'](doc.toString(), indexToPos(doc, pos));
 	if (hover) {
 		await loadScript('npm/markdown-it/dist/markdown-it.min.js', 'markdownit', true);
 		md ??= markdownit();

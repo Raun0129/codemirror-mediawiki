@@ -616,7 +616,7 @@ export class CodeMirror6 {
 			this.toggle(false);
 		}
 		if (this.#view) {
-			getLSP(this.#view)?.destroy();
+			getLSP(this.#view)?.['destroy']();
 			this.#view.destroy();
 		}
 		Object.setPrototypeOf(this, null);
