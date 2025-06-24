@@ -13,7 +13,7 @@ import {html} from 'wikiparser-node/config/default.json';
  *
  * @see https://www.mediawiki.org/wiki/Extension:CodeMirror#Extension_integration
  */
-export const htmlTags = html.flat(),
+export const htmlTags = ([]).concat(...html),
 
 	/** HTML tags that are only self-closing. */
 	voidHtmlTags = html[2]!,
